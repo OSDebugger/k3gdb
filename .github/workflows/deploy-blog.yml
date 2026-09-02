@@ -1,0 +1,47 @@
+name: Deploy K3GDB Log
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'blogs/**'
+      - '.github/workflows/deploy-blog.yml'
+
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: ./blogs
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: blogs/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build VitePress
+        run: npm run build
+
+      - name: Deploy to blog branch
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./blogs/.vitepress/dist
+          publish_branch: blog
+          force_orphan: true
