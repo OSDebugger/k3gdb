@@ -14,6 +14,13 @@ export default withSidebar(
         provider: 'local'
       },
 
+      socialLinks: [
+        {
+          icon: 'github',
+          link: 'https://github.com/OSDebugger/k3gdb'
+        }
+      ],
+
       outline: {
         level: [2, 3],
         label: '本页目录'
