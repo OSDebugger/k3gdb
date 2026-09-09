@@ -14,10 +14,14 @@ export default withSidebar(
         provider: 'local'
       },
 
-      socialLinks: [
+      nav: [
         {
-          icon: 'github',
+          text: 'K3调试-logs',
           link: 'https://github.com/OSDebugger/k3gdb'
+        },
+        {
+          text: 'ARD 源码仓库',
+          link: 'https://github.com/OSDebugger/async-debug/tree/async-integration'
         }
       ],
 
