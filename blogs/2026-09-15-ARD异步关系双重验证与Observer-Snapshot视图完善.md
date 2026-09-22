@@ -105,9 +105,11 @@ Future A → Future B
 
 **“这条异步等待关系是否真实发生过？”**
 
-但是继续验证以后，又出现了第二个问题。
+但是继续验证以后，又遇到了一个很具体的 bug：
 
-比如在时间 T1：
+**一次 poll 已经物理返回，但 TLS 里还残留着旧的 active 信息，导致 Snapshot 误以为这个 activation 仍然处于 Current 状态。**后来引入了 activation token，用 (store_generation, origin_tid, CID, poll_occurrence) 去精确标识一次 poll invocation，把已经退出的 activation 正确退休掉。所以本次把这个已经存在、而且确实解决真实问题的机制提炼出来了，同时对这套机制做得更严谨了一些。
+
+就是在时间 T1：
 
 ```text
 Future A
@@ -121,17 +123,7 @@ Future B
 A → B
 ```
 
-但程序继续运行到时间 T2 时，A 可能已经结束这次等待，或者已经开始等待另一个 Future C。
-
-如果 Snapshot 仍然直接读取旧的 Validated Relation，就可能出现：
-
-```text
-History:
-A → B
-
-Current:
-仍然显示 A → B
-```
+但程序继续运行到时间 T2 时，A 已经结束这次等待，或者开始等待另一个 Future C。
 
 实际上，历史上成立并不意味着当前仍然成立。
 
