@@ -1,0 +1,35 @@
+/* 整个页面的最大宽度 */
+:root {
+  --vp-layout-max-width: 1900px;
+  --vp-content-width: 1200px;
+}
+
+/* 大屏幕：扩大正文和整体布局 */
+@media (min-width: 1280px) {
+  .VPDoc .container {
+    max-width: 1900px !important;
+  }
+
+  .VPDoc .content-container {
+    max-width: 1200px !important;
+  }
+}
+
+/* 超宽屏幕：正文继续放宽 */
+@media (min-width: 1600px) {
+  .VPDoc .content-container {
+    max-width: 1200px !important;
+  }
+}
+
+/* 小屏幕：保持自适应，避免横向溢出 */
+@media (max-width: 1279px) {
+  .VPDoc .content-container {
+    max-width: 100% !important;
+  }
+
+  .VPDoc .content {
+    padding-left: 20px;
+    padding-right: 20px;
+  }
+}
