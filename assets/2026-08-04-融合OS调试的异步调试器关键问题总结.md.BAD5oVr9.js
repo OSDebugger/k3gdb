@@ -1,0 +1,185 @@
+import{_ as s,o as n,c as p,a2 as e}from"./chunks/framework.Ca9F9Y59.js";const u=JSON.parse('{"title":"ARD 异步调试关键问题与解决方案总结","description":"","frontmatter":{},"headers":[],"relativePath":"2026-08-04-融合OS调试的异步调试器关键问题总结.md","filePath":"2026-08-04-融合OS调试的异步调试器关键问题总结.md"}'),l={name:"2026-08-04-融合OS调试的异步调试器关键问题总结.md"};function i(t,a,c,o,h,d){return n(),p("div",null,[...a[0]||(a[0]=[e(`<h1 id="ard-异步调试关键问题与解决方案总结" tabindex="-1">ARD 异步调试关键问题与解决方案总结 <a class="header-anchor" href="#ard-异步调试关键问题与解决方案总结" aria-label="Permalink to &quot;ARD 异步调试关键问题与解决方案总结&quot;">​</a></h1><h2 id="项目目标" tabindex="-1">项目目标 <a class="header-anchor" href="#项目目标" aria-label="Permalink to &quot;项目目标&quot;">​</a></h2><p>ARD（Async Rust Debugger）面向Rust异步程序和异步操作系统内核，目标是在普通源码调试基础上恢复异步函数之间的真实执行关系。</p><p>以前大赛对于异步问题主要是解决：如何理解 Rust async 程序结构。核心是：静态 + 当前运行逻辑恢复。</p><p>而目前的异步调试器则是解决：如何把 async 理解能力接入真实 OS 调试体系，形成可持续重建的运行历史。</p><p>它力求进一步回答：</p><ul><li>当前异步任务从哪里进入？</li><li>执行过程中调用了哪些异步函数？</li><li>暂停时还有哪些任务处于活动状态？</li></ul><p>所以融合OS的异步调试器的核心是通过设计以下调试链路：</p><div class="language-text vp-adaptive-theme"><button title="Copy Code" class="copy"></button><span class="lang">text</span><pre class="shiki shiki-themes github-light github-dark vp-code" tabindex="0"><code><span class="line"><span>断点命中</span></span>
+<span class="line"><span>  ↓</span></span>
+<span class="line"><span>记录异步执行过程</span></span>
+<span class="line"><span>  ↓</span></span>
+<span class="line"><span>恢复函数调用关系</span></span>
+<span class="line"><span>  ↓</span></span>
+<span class="line"><span>保存历史调用树</span></span>
+<span class="line"><span>  ↓</span></span>
+<span class="line"><span>恢复暂停时的当前异步状态</span></span>
+<span class="line"><span>  ↓</span></span>
+<span class="line"><span>VS Code展示逻辑调用关系</span></span></code></pre></div><p>来实现重建异步函数的调用图。</p><p>其中，白名单 <strong>whitelist</strong> 位于异步调试链路的观测入口阶段，用于选择需要插入运行观察点的函数范围。它不直接参与调用树构建，而是决定哪些函数能够产生 <strong>Runtime Event</strong> 。</p><p>函数命中观察点后，调试器进一步根据异步生命周期信息恢复调用关系，并由 <strong>History Tree</strong> 和 <strong>Snapshot</strong> 分别保存历史关系和当前状态。</p><h2 id="问题一-异步调试能力与main操作系统特权级调试能力的合并" tabindex="-1">问题一：异步调试能力与main操作系统特权级调试能力的合并 <a class="header-anchor" href="#问题一-异步调试能力与main操作系统特权级调试能力的合并" aria-label="Permalink to &quot;问题一：异步调试能力与main操作系统特权级调试能力的合并&quot;">​</a></h2><h3 id="现象" tabindex="-1">现象 <a class="header-anchor" href="#现象" aria-label="Permalink to &quot;现象&quot;">​</a></h3><p>debugger-2异步调试版本已经能够恢复Rust异步函数之间的调用关系，包括：</p><ul><li>异步函数进入和退出；</li><li>历史调用关系保存；</li><li>当前异步状态恢复；</li><li>Async Inspector展示执行关系。</li></ul><p>但是在面对真实操作系统内核时，无法完整利用已有的内核调试能力，也无法同时满足异步函数追踪和操作系统特权级调试需求。</p><h3 id="原因分析" tabindex="-1">原因分析 <a class="header-anchor" href="#原因分析" aria-label="Permalink to &quot;原因分析&quot;">​</a></h3><p>原有异步调试方案解决的是“异步函数之间如何连接”的问题，主要关注：</p><div class="language-text vp-adaptive-theme"><button title="Copy Code" class="copy"></button><span class="lang">text</span><pre class="shiki shiki-themes github-light github-dark vp-code" tabindex="0"><code><span class="line"><span>函数执行</span></span>
+<span class="line"><span>  ↓</span></span>
+<span class="line"><span>异步生命周期</span></span>
+<span class="line"><span>  ↓</span></span>
+<span class="line"><span>调用关系恢复</span></span></code></pre></div><p>而操作系统调试需要额外关注：</p><div class="language-text vp-adaptive-theme"><button title="Copy Code" class="copy"></button><span class="lang">text</span><pre class="shiki shiki-themes github-light github-dark vp-code" tabindex="0"><code><span class="line"><span>当前运行在哪个特权级</span></span>
+<span class="line"><span>  ↓</span></span>
+<span class="line"><span>是否发生系统调用或上下文切换</span></span>
+<span class="line"><span>  ↓</span></span>
+<span class="line"><span>当前断点属于哪个执行环境</span></span></code></pre></div><p>二者关注的维度不同，原来的异步调试能力能够恢复任务内部关系，但是缺少操作系统层面的运行控制能力；原有内核调试能力能够控制不同执行环境，但是缺少异步函数生命周期记录能力。</p><h3 id="解决方案" tabindex="-1">解决方案 <a class="header-anchor" href="#解决方案" aria-label="Permalink to &quot;解决方案&quot;">​</a></h3><p>将两类能力结合，原来异步调试基础上接入内核调试：</p><div class="language-text vp-adaptive-theme"><button title="Copy Code" class="copy"></button><span class="lang">text</span><pre class="shiki shiki-themes github-light github-dark vp-code" tabindex="0"><code><span class="line"><span>断点控制</span></span>
+<span class="line"><span>      ↓</span></span>
+<span class="line"><span>特权级切换</span></span>
+<span class="line"><span>      ↓</span></span>
+<span class="line"><span>系统状态观察</span></span></code></pre></div><p>融合后达到以下链路：</p><div class="language-text vp-adaptive-theme"><button title="Copy Code" class="copy"></button><span class="lang">text</span><pre class="shiki shiki-themes github-light github-dark vp-code" tabindex="0"><code><span class="line"><span>操作系统调试控制层</span></span>
+<span class="line"><span>        ↓</span></span>
+<span class="line"><span>识别当前运行环境</span></span>
+<span class="line"><span>        ↓</span></span>
+<span class="line"><span>捕获关键异步函数事件</span></span>
+<span class="line"><span>        ↓</span></span>
+<span class="line"><span>记录异步生命周期</span></span>
+<span class="line"><span>        ↓</span></span>
+<span class="line"><span>恢复调用关系</span></span>
+<span class="line"><span>        ↓</span></span>
+<span class="line"><span>生成历史调用树和当前快照</span></span></code></pre></div><p>其中，保留原有内核调试框架，负责断点控制、运行状态管理和特权级环境识别； 引入异步追踪机制，负责记录异步函数进入、退出以及调用关系； 两者通过统一调试流程连接，使异步信息能够运行在真实操作系统环境中。</p><h3 id="能力提升" tabindex="-1">能力提升 <a class="header-anchor" href="#能力提升" aria-label="Permalink to &quot;能力提升&quot;">​</a></h3><p>融合后，ARD从单纯的异步函数调试工具，提升为面向异步操作系统内核的调试框架。</p><p>原来只能回答某个异步函数如何执行，融合后可以进一步回答：</p><ul><li>系统当前运行在哪个环境？</li><li>异步任务如何进入内核？</li><li>内核内部调用了哪些异步函数？</li><li>暂停时仍有哪些任务处于活动状态？</li></ul><p>这一设计补充了异步调试链路中的操作系统环境部分：</p><div class="language-text vp-adaptive-theme"><button title="Copy Code" class="copy"></button><span class="lang">text</span><pre class="shiki shiki-themes github-light github-dark vp-code" tabindex="0"><code><span class="line"><span>断点命中</span></span>
+<span class="line"><span>  ↓</span></span>
+<span class="line"><span>识别执行环境</span></span>
+<span class="line"><span>  ↓</span></span>
+<span class="line"><span>捕获异步运行事件</span></span>
+<span class="line"><span>  ↓</span></span>
+<span class="line"><span>恢复异步调用关系</span></span>
+<span class="line"><span>  ↓</span></span>
+<span class="line"><span>展示当前状态和历史关系</span></span></code></pre></div><p>ARD因此具备了在真实异步操作系统内核中进行调试的基础能力。</p><p>OS负责控制程序怎么停，Async负责解释程序为什么停</p><h2 id="问题二-提升异步调用关系的完整性和精确性" tabindex="-1">问题二：提升异步调用关系的完整性和精确性 <a class="header-anchor" href="#问题二-提升异步调用关系的完整性和精确性" aria-label="Permalink to &quot;问题二：提升异步调用关系的完整性和精确性&quot;">​</a></h2><h3 id="现象-1" tabindex="-1">现象 <a class="header-anchor" href="#现象-1" aria-label="Permalink to &quot;现象&quot;">​</a></h3><p>调试器能够在异步函数内部暂停，但调用栈通常只能显示当前正在执行的函数、执行器和部分底层函数。当异步任务暂停并在之后继续运行时，开发者难以从当前调用栈判断：</p><ul><li>这个任务由谁调用；</li><li>它此前等待过哪个任务；</li><li>多个异步函数之间形成了怎样的执行链。</li></ul><h3 id="原因分析-1" tabindex="-1">原因分析 <a class="header-anchor" href="#原因分析-1" aria-label="Permalink to &quot;原因分析&quot;">​</a></h3><p>异步函数暂停后不会一直保留原来的函数栈，后续恢复执行时可能由执行器重新进入。因此，当前调用栈只能说明“现在执行到哪里”，不能完整说明“异步任务是怎样运行到这里的”。如果调试器只在暂停后读取一次调用栈，之前已经消失的关系无法恢复。</p><h3 id="解决方案-1" tabindex="-1">解决方案 <a class="header-anchor" href="#解决方案-1" aria-label="Permalink to &quot;解决方案&quot;">​</a></h3><p>之前大赛方案：</p><div class="language-text vp-adaptive-theme"><button title="Copy Code" class="copy"></button><span class="lang">text</span><pre class="shiki shiki-themes github-light github-dark vp-code" tabindex="0"><code><span class="line"><span>poll命中</span></span>
+<span class="line"><span> ↓</span></span>
+<span class="line"><span>结合 __awaitee / call-site</span></span>
+<span class="line"><span> ↓</span></span>
+<span class="line"><span>恢复关系</span></span></code></pre></div><p>之前大赛方案虽然已经能够通过 poll 追踪、Future依赖分析以及入口/出口事件恢复当前异步逻辑关系，但主要关注当前执行过程</p><p>而目前在验证过程中则进一步将运行过程标准化为 RuntimeEvent，并形成可长期保存的执行历史：</p><div class="language-text vp-adaptive-theme"><button title="Copy Code" class="copy"></button><span class="lang">text</span><pre class="shiki shiki-themes github-light github-dark vp-code" tabindex="0"><code><span class="line"><span>函数进入</span></span>
+<span class="line"><span> ↓</span></span>
+<span class="line"><span>持续记录 RuntimeEvent</span></span>
+<span class="line"><span> ↓</span></span>
+<span class="line"><span>函数退出</span></span>
+<span class="line"><span> ↓</span></span>
+<span class="line"><span>闭合生命周期</span></span>
+<span class="line"><span> ↓</span></span>
+<span class="line"><span>生成真实父子关系</span></span>
+<span class="line"><span> ↓</span></span>
+<span class="line"><span>暂停时读取已经保存的异步执行信息</span></span></code></pre></div><p>ARD把<strong>运行过程本身作为调试信息来源</strong>。每次关键异步函数开始执行时记录进入，返回时记录退出，并保存其与外层任务的关系。</p><h3 id="能力提升-1" tabindex="-1">能力提升 <a class="header-anchor" href="#能力提升-1" aria-label="Permalink to &quot;能力提升&quot;">​</a></h3><p>这一设计补上了“断点命中”与“调用关系恢复”之间缺失的运行过程记录，异步调试器从之前只能看到当前函数，提升为能够恢复：</p><div class="language-text vp-adaptive-theme"><button title="Copy Code" class="copy"></button><span class="lang">text</span><pre class="shiki shiki-themes github-light github-dark vp-code" tabindex="0"><code><span class="line"><span>外层异步任务</span></span>
+<span class="line"><span>  ↓</span></span>
+<span class="line"><span>内层异步任务</span></span>
+<span class="line"><span>  ↓</span></span>
+<span class="line"><span>当前执行位置</span></span></code></pre></div><h2 id="问题三-维护历史事件长期保存的中间维护层" tabindex="-1">问题三：维护历史事件长期保存的中间维护层 <a class="header-anchor" href="#问题三-维护历史事件长期保存的中间维护层" aria-label="Permalink to &quot;问题三：维护历史事件长期保存的中间维护层&quot;">​</a></h2><h3 id="现象-2" tabindex="-1">现象 <a class="header-anchor" href="#现象-2" aria-label="Permalink to &quot;现象&quot;">​</a></h3><p>之前虽然调试器能够捕获异步函数执行事件，但是如果只记录函数进入、退出等运行日志，仍然无法长期保存异步任务之间形成的调用关系。</p><p>当 Future 因为 Pending 暂停后，原有物理调用栈会消失。此时如果仅依靠当前执行现场，无法回答：</p><ul><li>某个异步任务之前调用过哪些子任务；</li><li>某两个 Future 之间是否形成过稳定调用关系；</li><li>程序运行过程中完整经历了哪些异步调用路径。</li></ul><p>如果运行事件只作为临时日志存在，暂停后这些信息仍然无法被调试器查询和展示。</p><h3 id="原因分析-2" tabindex="-1">原因分析 <a class="header-anchor" href="#原因分析-2" aria-label="Permalink to &quot;原因分析&quot;">​</a></h3><p>runtime_trace 负责捕获运行事实，但是单次事件本身只描述某个时间点或某个函数 发生了一次进入或退出，它无法直接表示：异步任务A -&gt; B -&gt; c 这样的长期关系。 因此需要一个<strong>中间层</strong>，将离散的 RuntimeEvent 转换为<strong>持续维护的异步执行模型</strong>。</p><h3 id="解决方案-2" tabindex="-1">解决方案 <a class="header-anchor" href="#解决方案-2" aria-label="Permalink to &quot;解决方案&quot;">​</a></h3><p>之前是通过：RuntimeEvent临时记录来直接生成调用树，这样会存在几个问题：比如，运行事件和调用关系混在一起；无法保存长期历史；并且容易根据事件顺序产生错误连接。</p><p>最新异步调试器则在此基础上进行改进：</p><div class="language-text vp-adaptive-theme"><button title="Copy Code" class="copy"></button><span class="lang">text</span><pre class="shiki shiki-themes github-light github-dark vp-code" tabindex="0"><code><span class="line"><span>RuntimeEvent</span></span>
+<span class="line"><span> ↓</span></span>
+<span class="line"><span>RuntimeEventGraph</span></span>
+<span class="line"><span> ↓</span></span>
+<span class="line"><span>History Tree</span></span>
+<span class="line"><span> ↓</span></span>
+<span class="line"><span>Async Inspector展示</span></span></code></pre></div><p>它新增了维护历史事件的中间层，并对运行事实图结构进行了清晰的划分：</p><ul><li>RuntimeEvent 负责记录函数进入、退出等事实；</li><li>RuntimeEventGraph 通过根据事件维护节点、边、生命周期状态，可以保存“程序真实发生过什么”；</li><li>History Tree 则可以从运行事实中生成历史调用关系，保存“异步调用关系如何形成”。</li></ul><h3 id="能力提升-2" tabindex="-1">能力提升 <a class="header-anchor" href="#能力提升-2" aria-label="Permalink to &quot;能力提升&quot;">​</a></h3><p>这一设计补充了从运行事件采集到历史调用关系恢复之间缺失的数据层，ARD不再只是记录异步函数执行日志，而是能够长期保存：</p><div class="language-text vp-adaptive-theme"><button title="Copy Code" class="copy"></button><span class="lang">text</span><pre class="shiki shiki-themes github-light github-dark vp-code" tabindex="0"><code><span class="line"><span>历史异步任务</span></span>
+<span class="line"><span>    ↓</span></span>
+<span class="line"><span>子任务调用关系</span></span>
+<span class="line"><span>    ↓</span></span>
+<span class="line"><span>完整执行路径</span></span></code></pre></div><p>使 Future 即使已经暂停或退出，其曾经形成的调用关系仍然可以被查询和展示。</p><h2 id="问题四-过去执行事件与正在执行事件概念不同" tabindex="-1">问题四：过去执行事件与正在执行事件概念不同 <a class="header-anchor" href="#问题四-过去执行事件与正在执行事件概念不同" aria-label="Permalink to &quot;问题四：过去执行事件与正在执行事件概念不同&quot;">​</a></h2><h3 id="现象-3" tabindex="-1">现象 <a class="header-anchor" href="#现象-3" aria-label="Permalink to &quot;现象&quot;">​</a></h3><p>调试过程中可能出现：</p><ul><li>调用树中仍有节点，但当前异步状态为空；</li><li>当前暂停在两层异步函数内部，但这些函数还没有产生退出记录；</li><li>清除历史显示后，当前暂停状态仍然存在。</li></ul><p>之前大赛版本，解决办法是把多次 snapshot 直接合并到同一棵树里，虽然看起来链路更完整，但会产生历史残留，导致当前 snapshot 中已经不存在的节点仍然显示在 UI 上，容易误判为当前执行上下文的一部分。</p><h3 id="原因分析-3" tabindex="-1">原因分析 <a class="header-anchor" href="#原因分析-3" aria-label="Permalink to &quot;原因分析&quot;">​</a></h3><p>“过去发生过什么”和“现在正在执行什么”是两个不同问题。</p><p>历史关系需要在函数返回后继续保留，用于分析程序曾经走过的路径。当前状态则只应包含暂停瞬间尚未结束的异步任务。</p><p>因此，<strong>历史数据不能直接当作当前状态，当前暂停路径也不能承担长期历史记录职责</strong>。</p><h3 id="解决方案-3" tabindex="-1">解决方案 <a class="header-anchor" href="#解决方案-3" aria-label="Permalink to &quot;解决方案&quot;">​</a></h3><p>ARD将两类信息分开，在代码层面实现解耦：</p><p>历史调用树：</p><div class="language-text vp-adaptive-theme"><button title="Copy Code" class="copy"></button><span class="lang">text</span><pre class="shiki shiki-themes github-light github-dark vp-code" tabindex="0"><code><span class="line"><span>记录运行期间真实发生过的调用关系</span></span>
+<span class="line"><span>任务返回后仍然保留</span></span></code></pre></div><p>当前快照：</p><div class="language-text vp-adaptive-theme"><button title="Copy Code" class="copy"></button><span class="lang">text</span><pre class="shiki shiki-themes github-light github-dark vp-code" tabindex="0"><code><span class="line"><span>只读取暂停瞬间仍然活动的异步路径</span></span>
+<span class="line"><span>任务返回后从当前路径移除</span></span></code></pre></div><p>暂停时，调试器结合当前活动任务、任务地址和调试信息，恢复当前异步路径。历史调用树则继续累计运行事实，不从当前快照反向生成。</p><h3 id="能力提升-3" tabindex="-1">能力提升 <a class="header-anchor" href="#能力提升-3" aria-label="Permalink to &quot;能力提升&quot;">​</a></h3><p>这一设计补上了“历史关系形成”之后的当前状态恢复环节。开发者现在可以同时查看：</p><ul><li>历史调用树：程序过去形成了哪些异步关系；</li><li>当前快照：程序此刻暂停在哪条异步路径上。</li></ul><p>之前大赛版本更多关注<strong>如何恢复异步调用树</strong>，现在则是区分<strong>历史发生事件 ≠ 当前暂停在哪里</strong>，这个属于调试模型设计优化。当任务全部返回后，当前快照可以正确变为空，而历史调用树仍保存已经发生的调用关系。</p><h2 id="问题五-异步状态统一协议设计" tabindex="-1">问题五：异步状态统一协议设计 <a class="header-anchor" href="#问题五-异步状态统一协议设计" aria-label="Permalink to &quot;问题五：异步状态统一协议设计&quot;">​</a></h2><h3 id="现象-4" tabindex="-1">现象 <a class="header-anchor" href="#现象-4" aria-label="Permalink to &quot;现象&quot;">​</a></h3><p>调试器已经能够在暂停位置恢复当前异步任务状态，但是不同来源的信息格式不统一，出现了信息格式出错，以及前端不显示等现象，比如：</p><p>Future地址，CID身份，Future类型，状态信息，父子关系，可信程度等；这些信息直接通过日志输出或临时结构传递，发现难以被 DAP、VS Code Inspector 等不同组件稳定使用的情况。</p><p>同时，部分信息也无法确定，例如出现了Future状态无法解析，await关系无法确认，DWARF信息缺失等问题。</p><h3 id="原因分析-4" tabindex="-1">原因分析 <a class="header-anchor" href="#原因分析-4" aria-label="Permalink to &quot;原因分析&quot;">​</a></h3><p>传统调试器主要通过：</p><div class="language-text vp-adaptive-theme"><button title="Copy Code" class="copy"></button><span class="lang">text</span><pre class="shiki shiki-themes github-light github-dark vp-code" tabindex="0"><code><span class="line"><span>当前栈帧</span></span>
+<span class="line"><span> ↓</span></span>
+<span class="line"><span>源码位置</span></span>
+<span class="line"><span> ↓</span></span>
+<span class="line"><span>变量信息</span></span></code></pre></div><p>描述当前状态。但是异步调试需要额外表达：</p><div class="language-text vp-adaptive-theme"><button title="Copy Code" class="copy"></button><span class="lang">text</span><pre class="shiki shiki-themes github-light github-dark vp-code" tabindex="0"><code><span class="line"><span>Future身份</span></span>
+<span class="line"><span> ↓</span></span>
+<span class="line"><span>生命周期状态</span></span>
+<span class="line"><span> ↓</span></span>
+<span class="line"><span>异步父子关系</span></span>
+<span class="line"><span> ↓</span></span>
+<span class="line"><span>信息可信程度</span></span></code></pre></div><p>当缺少统一协议时容易产生Snapshot无法稳定传递，UI层需要自行解析不同格式，未知状态容易被误认为确定结果等问题。</p><h3 id="解决方案-4" tabindex="-1">解决方案 <a class="header-anchor" href="#解决方案-4" aria-label="Permalink to &quot;解决方案&quot;">​</a></h3><p>之前是通过以下方式：</p><div class="language-text vp-adaptive-theme"><button title="Copy Code" class="copy"></button><span class="lang">text</span><pre class="shiki shiki-themes github-light github-dark vp-code" tabindex="0"><code><span class="line"><span>暂停</span></span>
+<span class="line"><span> ↓</span></span>
+<span class="line"><span>读取当前异步信息</span></span>
+<span class="line"><span> ↓</span></span>
+<span class="line"><span>直接输出结果</span></span></code></pre></div><p>最新调试器则是设计了统一的 Snapshot 协议：</p><div class="language-text vp-adaptive-theme"><button title="Copy Code" class="copy"></button><span class="lang">text</span><pre class="shiki shiki-themes github-light github-dark vp-code" tabindex="0"><code><span class="line"><span>GDB暂停</span></span>
+<span class="line"><span> ↓</span></span>
+<span class="line"><span>读取当前活动Future</span></span>
+<span class="line"><span> ↓</span></span>
+<span class="line"><span>生成SnapshotV1</span></span>
+<span class="line"><span> ↓</span></span>
+<span class="line"><span>DAP / Inspector消费</span></span></code></pre></div><p>SnapshotV1统一描述CID、Future身份、状态信息、父子关系以及可信度等异步状态信息，并提供结构化错误和解析结果描述。</p><h3 id="能力提升-4" tabindex="-1">能力提升 <a class="header-anchor" href="#能力提升-4" aria-label="Permalink to &quot;能力提升&quot;">​</a></h3><p>这一设计补充了以下关系之间的数据协议：</p><div class="language-text vp-adaptive-theme"><button title="Copy Code" class="copy"></button><span class="lang">text</span><pre class="shiki shiki-themes github-light github-dark vp-code" tabindex="0"><code><span class="line"><span>异步状态恢复</span></span>
+<span class="line"><span>        ↓</span></span>
+<span class="line"><span>统一数据表达</span></span>
+<span class="line"><span>        ↓</span></span>
+<span class="line"><span>多端展示</span></span></code></pre></div><p>ARD不再只是输出调试日志，而是形成标准化异步状态描述，使：DAP logical frame；Async Inspector或者后续不同平台适配，都可以基于同一Snapshot协议工作。</p><h2 id="问题六-连接树稳定性保护层设计" tabindex="-1">问题六：连接树稳定性保护层设计 <a class="header-anchor" href="#问题六-连接树稳定性保护层设计" aria-label="Permalink to &quot;问题六：连接树稳定性保护层设计&quot;">​</a></h2><h3 id="现象-5" tabindex="-1">现象 <a class="header-anchor" href="#现象-5" aria-label="Permalink to &quot;现象&quot;">​</a></h3><p>在程序中，异步函数会被多次执行，同一函数也可能在不同阶段反复出现。如果按照以前的“谁先出现、谁后出现”直接连接的方式，调用树发现产生了种种情况：</p><ul><li>父子关系错误；</li><li>同一节点连接自己；</li><li>父子方向反转；</li><li>一个节点被多个无关父节点重复连接；</li><li>根节点丢失；</li><li>树出现循环或断裂。</li></ul><h3 id="解决方案-5" tabindex="-1">解决方案 <a class="header-anchor" href="#解决方案-5" aria-label="Permalink to &quot;解决方案&quot;">​</a></h3><p>选择了进行连接树稳定性保护。</p><p>原来大赛版本：</p><div class="language-text vp-adaptive-theme"><button title="Copy Code" class="copy"></button><span class="lang">text</span><pre class="shiki shiki-themes github-light github-dark vp-code" tabindex="0"><code><span class="line"><span>函数A出现</span></span>
+<span class="line"><span>函数B随后出现</span></span>
+<span class="line"><span>  ↓</span></span>
+<span class="line"><span>直接连接A → B</span></span></code></pre></div><p>最新调试器对大赛版本进行了改进：</p><div class="language-text vp-adaptive-theme"><button title="Copy Code" class="copy"></button><span class="lang">text</span><pre class="shiki shiki-themes github-light github-dark vp-code" tabindex="0"><code><span class="line"><span>检查当前真实运行上下文</span></span>
+<span class="line"><span>  ↓</span></span>
+<span class="line"><span>确认直接父节点</span></span>
+<span class="line"><span>  ↓</span></span>
+<span class="line"><span>检查是否形成自环或循环</span></span>
+<span class="line"><span>  ↓</span></span>
+<span class="line"><span>保护已经确认的根节点</span></span>
+<span class="line"><span>  ↓</span></span>
+<span class="line"><span>保留更准确的父子关系</span></span></code></pre></div><p>之前比赛重点是<strong>恢复关系</strong>。现在重点解决：<strong>恢复出来的关系是否可靠</strong>。 调用关系建立后还会进行一致性检查，避免缺失节点、重复边和环路。界面读取的是历史树副本，查询和展示不会反向修改后端关系。</p><h3 id="能力提升-5" tabindex="-1">能力提升 <a class="header-anchor" href="#能力提升-5" aria-label="Permalink to &quot;能力提升&quot;">​</a></h3><p>这一设计补上了“记录运行事件”到“生成稳定调用树”之间的关系校验。</p><p>ARD不再把事件顺序直接当作调用关系，而是将真实运行上下文转换为稳定父子结构。minimal、Embassy和ReL4验证中均形成了方向正确、无循环的调用树。</p><h2 id="问题七-同步函数与异步函数观测设计方案" tabindex="-1">问题七：同步函数与异步函数观测设计方案 <a class="header-anchor" href="#问题七-同步函数与异步函数观测设计方案" aria-label="Permalink to &quot;问题七：同步函数与异步函数观测设计方案&quot;">​</a></h2><p>当前 ARD 使用统一的运行事件模型记录函数执行过程，目前的白名单主要承担“哪些函数需要被观察”的作用，但是它并不会直接决定函数一定进入异步调用关系。所以函数进入观测后，调试器需要进一步判断其类型是异步还是同步函数：</p><ul><li>异步函数：需要记录 Future 地址、生命周期、进入退出关系，并参与异步调用树构建；</li><li>同步函数：主要用于提供执行上下文信息，帮助理解程序运行过程。</li></ul><p>由于同步函数和异步函数共享同一套观测入口，当白名单范围过大时，大量同步函数也会产生断点管理和事件处理开销，从而影响异步任务捕获效率。</p><p>因此问题并不是同步函数不能存在于执行图，而是需要进一步优化同步、异步事件的分层管理，避免同步观测影响异步生命周期追踪。</p><h3 id="解决方案-6" tabindex="-1">解决方案 <a class="header-anchor" href="#解决方案-6" aria-label="Permalink to &quot;解决方案&quot;">​</a></h3><p>ARD 选择在 Runtime Trace 阶段对同步函数和异步函数进行分类处理：</p><div class="language-text vp-adaptive-theme"><button title="Copy Code" class="copy"></button><span class="lang">text</span><pre class="shiki shiki-themes github-light github-dark vp-code" tabindex="0"><code><span class="line"><span>用户配置白名单</span></span>
+<span class="line"><span>        ↓</span></span>
+<span class="line"><span>Whitelist Loader</span></span>
+<span class="line"><span>        ↓</span></span>
+<span class="line"><span>函数 Observer 注册</span></span>
+<span class="line"><span>        ↓</span></span>
+<span class="line"><span>Runtime Trace 捕获函数执行</span></span>
+<span class="line"><span>        ↓</span></span>
+<span class="line"><span>函数类型判断</span></span>
+<span class="line"><span>        ↓</span></span>
+<span class="line"><span> ┌──────────────────┐</span></span>
+<span class="line"><span> │                  │</span></span>
+<span class="line"><span>异步函数          同步函数</span></span>
+<span class="line"><span> │                  │</span></span>
+<span class="line"><span>Async Runtime   Sync Runtime</span></span>
+<span class="line"><span>Trace              Trace</span></span>
+<span class="line"><span> │                  │</span></span>
+<span class="line"><span>CID/Future      普通执行事件</span></span>
+<span class="line"><span>生命周期管理      调试上下文</span></span>
+<span class="line"><span> │                  │</span></span>
+<span class="line"><span>History Tree    Execution信息</span></span>
+<span class="line"><span>Snapshot          辅助展示</span></span>
+<span class="line"><span> │                  │</span></span>
+<span class="line"><span> └──────────────────┘</span></span>
+<span class="line"><span>          ↓</span></span>
+<span class="line"><span>    Async Inspector</span></span></code></pre></div><h3 id="能力提升-6" tabindex="-1">能力提升 <a class="header-anchor" href="#能力提升-6" aria-label="Permalink to &quot;能力提升&quot;">​</a></h3><p>ARD当前已经在Runtime Trace阶段区分同步和异步执行事件。</p><p>异步事件进入Future生命周期追踪链，用于构建History和Snapshot；同步事件作为执行上下文保留，用于辅助理解程序运行过程。并且应用到minimal和embassy以及rel4，取得了异步函数和同步函数同时正确显示的效果</p><h2 id="问题八-对源码定位与异步逻辑位置冲突的改进" tabindex="-1">问题八：对源码定位与异步逻辑位置冲突的改进 <a class="header-anchor" href="#问题八-对源码定位与异步逻辑位置冲突的改进" aria-label="Permalink to &quot;问题八：对源码定位与异步逻辑位置冲突的改进&quot;">​</a></h2><h3 id="现象-6" tabindex="-1">现象 <a class="header-anchor" href="#现象-6" aria-label="Permalink to &quot;现象&quot;">​</a></h3><p>在异步调试过程中，调试器在源码展示阶段出现断点已经命中，但 VS Code 没有跳转到提前打好的源码准确位置，以及出现异步逻辑调用帧和物理调用栈对应的源码位置存在差异的问题。</p><p>例如：实际CPU停止位置是内核源码某一行，GDB此时已经获取正确地址和文件位置，但是DAP返回异步任务逻辑帧，这会让VS Code优先打开异步函数位置，这直接导致现象看到的是“当前异步任务属于哪里”，而不是“程序实际暂停在哪里”，表现为VS Code 没有跳转到准确的设置好的源码位置。</p><p>之前 debugger-2 版本是通过额外增加源码跳转辅助机制解决该问题的，但该方案主要针对当时异步调用栈和源码路径解析不一致的问题，最新的融合调试器则通过在主链路提前考虑设计进行解决。</p><h3 id="原因分析-5" tabindex="-1">原因分析 <a class="header-anchor" href="#原因分析-5" aria-label="Permalink to &quot;原因分析&quot;">​</a></h3><p>之前大赛结构比较简单：</p><div class="language-text vp-adaptive-theme"><button title="Copy Code" class="copy"></button><span class="lang">text</span><pre class="shiki shiki-themes github-light github-dark vp-code" tabindex="0"><code><span class="line"><span>GDB</span></span>
+<span class="line"><span> ↓</span></span>
+<span class="line"><span>DAP</span></span>
+<span class="line"><span> ↓</span></span>
+<span class="line"><span>VS Code</span></span></code></pre></div><p>异步调试过程中同时存在两类源码位置：</p><ul><li><p>第一类是异步逻辑位置，表示的是当前异步任务属于哪个函数。 例如：async_syscall_handler 它来自 ARD 根据 Future 状态恢复出的逻辑调用关系。</p></li><li><p>第二类是物理执行位置，表示的是CPU 当前真正执行到哪条指令。 例如：某个内核函数具体源码行，它来自 GDB 当前停止帧。</p></li></ul><p>传统调试器只关注物理执行位置，因此不存在冲突。但是异步调试增加了逻辑调用栈后：Snapshot恢复异步逻辑帧 + GDB提供物理调用帧两个信息来源具有不同语义。如果调试器直接使用第一个栈帧作为源码跳转依据，就可能优先展示异步逻辑位置，而不是断点真正打下的停止位置。</p><h3 id="解决方案-7" tabindex="-1">解决方案 <a class="header-anchor" href="#解决方案-7" aria-label="Permalink to &quot;解决方案&quot;">​</a></h3><p>ARD融合版本 async-integration 没有直接采用 debugger-2 的源码跳转辅助代码，而是采用分层设计：</p><div class="language-text vp-adaptive-theme"><button title="Copy Code" class="copy"></button><span class="lang">text</span><pre class="shiki shiki-themes github-light github-dark vp-code" tabindex="0"><code><span class="line"><span>GDB停止事件</span></span>
+<span class="line"><span>        ↓</span></span>
+<span class="line"><span>获取真实物理停止位置</span></span>
+<span class="line"><span>        ↓</span></span>
+<span class="line"><span>Runtime Trace记录异步状态</span></span>
+<span class="line"><span>        ↓</span></span>
+<span class="line"><span>Snapshot恢复异步逻辑位置</span></span>
+<span class="line"><span>        ↓</span></span>
+<span class="line"><span>DAP同时返回逻辑帧和物理帧</span></span>
+<span class="line"><span>        ↓</span></span>
+<span class="line"><span>源码路径统一解析</span></span>
+<span class="line"><span>        ↓</span></span>
+<span class="line"><span>VS Code展示</span></span></code></pre></div><p>其中：</p><ul><li>异步逻辑帧负责展示当前任务执行关系；</li><li>物理调用帧负责提供真实CPU停止位置；</li><li>源码路径解析统一处理不同测试环境、外部源码目录和DWARF路径。</li></ul><h3 id="能力提升-7" tabindex="-1">能力提升 <a class="header-anchor" href="#能力提升-7" aria-label="Permalink to &quot;能力提升&quot;">​</a></h3><p>融合架构成功解决了主要源码路径问题，也不再依赖之前的针对单个环境的路径辅助方案。这一设计补充了异步调试中“逻辑执行位置”和“物理停止位置”的区别。</p><p>之前调试器主要关注，程序停在哪里，融合后的调试器可以同时回答，异步任务当前处于哪个执行阶段 + CPU实际暂停在哪个源码位置</p><p>最终形成更加完整的异步调试模型：</p><div class="language-text vp-adaptive-theme"><button title="Copy Code" class="copy"></button><span class="lang">text</span><pre class="shiki shiki-themes github-light github-dark vp-code" tabindex="0"><code><span class="line"><span>运行事件记录</span></span>
+<span class="line"><span>        ↓</span></span>
+<span class="line"><span>异步状态恢复</span></span>
+<span class="line"><span>        ↓</span></span>
+<span class="line"><span>历史调用关系展示</span></span>
+<span class="line"><span>        ↓</span></span>
+<span class="line"><span>物理源码位置定位</span></span></code></pre></div><p>相比之前大赛版本主要解决“如何恢复异步调用关系”，融合版本进一步明确了异步调试中的逻辑位置 ≠ CPU停止位置。二者需要分别保存、分别处理，再在调试界面中统一展示。</p><h2 id="问题九-解决内核高地址导致异步函数无法记录退出的问题" tabindex="-1">问题九：解决内核高地址导致异步函数无法记录退出的问题 <a class="header-anchor" href="#问题九-解决内核高地址导致异步函数无法记录退出的问题" aria-label="Permalink to &quot;问题九：解决内核高地址导致异步函数无法记录退出的问题&quot;">​</a></h2><h3 id="现象-7" tabindex="-1">现象 <a class="header-anchor" href="#现象-7" aria-label="Permalink to &quot;现象&quot;">​</a></h3><p>之前大赛文档只是提出：异步操作系统 Release 编译、跨特权级存在困难。但是在ReL4异步内核验证中，调试器虽然可以识别异步函数入口，也能记录任务开始执行，但是函数返回时的观察机制创建失败，属于在OS是配置中产生的新问题。</p><p>结果表现为：</p><ul><li>有进入记录，没有对应退出记录；</li><li>已经结束的任务可能仍被认为处于活动状态；</li><li>父子调用关系不能稳定闭合；</li><li>当前异步状态可能残留过期任务。</li></ul><h3 id="原因分析-6" tabindex="-1">原因分析 <a class="header-anchor" href="#原因分析-6" aria-label="Permalink to &quot;原因分析&quot;">​</a></h3><p>普通用户程序通常运行在较低地址区域，而RISC-V内核运行在高地址区域，函数返回地址以 <code>0xffffffff</code> 开头。</p><p>GDB原有返回观察方式在Rust语言环境下无法正确处理这类高地址。问题发生在异步函数已经进入之后，因此入口事件已经产生，但退出事件无法产生。</p><p>异步调试不能只观察入口。只有进入和退出一一对应，调试器才能判断任务是否仍然活动，并正确维护嵌套关系。</p><h3 id="解决方案-8" tabindex="-1">解决方案 <a class="header-anchor" href="#解决方案-8" aria-label="Permalink to &quot;解决方案&quot;">​</a></h3><p>原来：</p><div class="language-text vp-adaptive-theme"><button title="Copy Code" class="copy"></button><span class="lang">text</span><pre class="shiki shiki-themes github-light github-dark vp-code" tabindex="0"><code><span class="line"><span>异步函数进入</span></span>
+<span class="line"><span>  ↓</span></span>
+<span class="line"><span>创建返回观察失败</span></span>
+<span class="line"><span>  ↓</span></span>
+<span class="line"><span>退出状态丢失</span></span></code></pre></div><p>改进：</p><div class="language-text vp-adaptive-theme"><button title="Copy Code" class="copy"></button><span class="lang">text</span><pre class="shiki shiki-themes github-light github-dark vp-code" tabindex="0"><code><span class="line"><span>识别RISC-V内核高地址</span></span>
+<span class="line"><span>  ↓</span></span>
+<span class="line"><span>使用兼容方式建立返回观察</span></span>
+<span class="line"><span>  ↓</span></span>
+<span class="line"><span>函数返回时记录退出</span></span>
+<span class="line"><span>  ↓</span></span>
+<span class="line"><span>清理当前任务状态</span></span></code></pre></div><p>同时增加失败回滚：如果返回观察仍然无法建立，调试器撤销刚刚写入的活动状态，避免留下错误的异步路径。</p><h3 id="能力提升-8" tabindex="-1">能力提升 <a class="header-anchor" href="#能力提升-8" aria-label="Permalink to &quot;能力提升&quot;">​</a></h3><p>这一处理补齐了异步生命周期的退出环节：</p><div class="language-text vp-adaptive-theme"><button title="Copy Code" class="copy"></button><span class="lang">text</span><pre class="shiki shiki-themes github-light github-dark vp-code" tabindex="0"><code><span class="line"><span>进入</span></span>
+<span class="line"><span>  ↓</span></span>
+<span class="line"><span>执行</span></span>
+<span class="line"><span>  ↓</span></span>
+<span class="line"><span>返回</span></span>
+<span class="line"><span>  ↓</span></span>
+<span class="line"><span>状态清理</span></span></code></pre></div><p>ReL4修正后的运行结果中，外层协程和内层异步处理函数均能正确进入和退出，返回后当前任务路径为空，历史调用关系仍被保留。</p><p>最新的调试器由“只能看到内核异步函数进入”提升为“能够完整记录一次内核异步调用生命周期”。</p><h1 id="真实环境验证结果" tabindex="-1">真实环境验证结果 <a class="header-anchor" href="#真实环境验证结果" aria-label="Permalink to &quot;真实环境验证结果&quot;">​</a></h1><h3 id="embassy异步程序" tabindex="-1">Embassy异步程序 <a class="header-anchor" href="#embassy异步程序" aria-label="Permalink to &quot;Embassy异步程序&quot;">​</a></h3><p>Embassy验证恢复了以下关系：</p><div class="language-text vp-adaptive-theme"><button title="Copy Code" class="copy"></button><span class="lang">text</span><pre class="shiki shiki-themes github-light github-dark vp-code" tabindex="0"><code><span class="line"><span>定时任务主体</span></span>
+<span class="line"><span>  ↓</span></span>
+<span class="line"><span>定时器Future</span></span></code></pre></div><p>验证结果包括：</p><ul><li>历史调用树形成两个节点、一条边；</li><li>异步函数进入和退出能够匹配；</li><li>暂停时恢复两层当前异步路径；</li><li>VS Code同时获得逻辑调用帧和物理调用帧；</li><li>Async Inspector正确显示Execution Graph。</li></ul><h3 id="rel4异步内核" tabindex="-1">ReL4异步内核 <a class="header-anchor" href="#rel4异步内核" aria-label="Permalink to &quot;ReL4异步内核&quot;">​</a></h3><p>ReL4验证恢复了以下内核内部关系：</p><div class="language-text vp-adaptive-theme"><button title="Copy Code" class="copy"></button><span class="lang">text</span><pre class="shiki shiki-themes github-light github-dark vp-code" tabindex="0"><code><span class="line"><span>外层协程执行</span></span>
+<span class="line"><span>  ↓</span></span>
+<span class="line"><span>内层异步系统调用处理</span></span></code></pre></div><p>验证结果包括：</p><ul><li>RISC-V高地址返回观察问题得到处理；</li><li>两个内核异步函数均能正确进入和退出；</li><li>历史调用树形成两个节点、一条边；</li><li>暂停时恢复两层内核异步路径；</li><li>VS Code返回两个逻辑异步帧，同时保留九个物理内核帧；</li><li>Async Inspector获得与历史调用树一致的执行关系。</li></ul><p>当前验证只覆盖ReL4内核异步运行时内部，用户态系统调用与内核异步处理之间还未形成完整跨特权级调用链。</p><h2 id="ard完整异步调试流程" tabindex="-1">ARD完整异步调试流程 <a class="header-anchor" href="#ard完整异步调试流程" aria-label="Permalink to &quot;ARD完整异步调试流程&quot;">​</a></h2><div class="language-text vp-adaptive-theme"><button title="Copy Code" class="copy"></button><span class="lang">text</span><pre class="shiki shiki-themes github-light github-dark vp-code" tabindex="0"><code><span class="line"><span>异步函数执行</span></span>
+<span class="line"><span>  ↓</span></span>
+<span class="line"><span>调试器捕获运行事件</span></span>
+<span class="line"><span>  ↓</span></span>
+<span class="line"><span>记录异步函数进入和退出</span></span>
+<span class="line"><span>  ↓</span></span>
+<span class="line"><span>恢复函数之间的父子关系</span></span>
+<span class="line"><span>  ↓</span></span>
+<span class="line"><span>形成历史调用树</span></span>
+<span class="line"><span>  ↓</span></span>
+<span class="line"><span>暂停时生成当前异步状态</span></span>
+<span class="line"><span>  ↓</span></span>
+<span class="line"><span>VS Code展示逻辑调用栈和历史调用关系</span></span></code></pre></div><p>这条链路中：</p><ul><li>运行记录解决异步调用关系会随传统栈消失的问题；</li><li>生命周期管理保证任务进入和退出能够对应；</li><li>关系检查保证历史调用树稳定；</li><li>当前快照恢复暂停瞬间仍在执行的异步路径；</li><li>VS Code调用栈和Async Inspector分别展示当前状态与历史关系。</li></ul><h2 id="当前已经实现的能力" tabindex="-1">当前已经实现的能力 <a class="header-anchor" href="#当前已经实现的能力" aria-label="Permalink to &quot;当前已经实现的能力&quot;">​</a></h2><ul><li>异步函数进入和退出追踪；</li><li>Future多次执行过程识别；</li><li>异步调用父子关系恢复；</li><li>历史调用树保存；</li><li>暂停瞬间异步状态恢复；</li><li>逻辑调用帧与物理调用帧同时显示；</li><li>Async Inspector执行关系展示；</li><li>Embassy异步程序验证；</li><li>ReL4异步内核内部调用链验证；</li><li>RISC-V内核高地址生命周期适配。</li></ul><p>暂未完成：</p><ul><li>用户态异步请求与内核异步处理之间的跨特权级完整关联；</li><li>用户态和内核态调用栈的统一融合；</li><li>Lilos及更多异步操作系统的完整运行验证。</li></ul><h2 id="总结" tabindex="-1">总结 <a class="header-anchor" href="#总结" aria-label="Permalink to &quot;总结&quot;">​</a></h2><p>ARD解决的核心问题，是通过记录运行过程、闭合函数进入和退出、检查父子关系、区分历史与当前状态，并将两类信息分别交给调用栈和异步调用树，使得能够在已验证环境中恢复完整的异步执行链路。</p><p>Embassy证明该方法可以用于标准Rust异步程序；ReL4证明该方法能够进入RISC-V异步内核，并恢复内核内部的两层异步调用关系。后续工作的重点可以在已有的基础上扩展跨特权级关联、也可在更多异步操作系统环境上适配验证。</p>`,202)])])}const b=s(l,[["render",i]]);export{u as __pageData,b as default};
